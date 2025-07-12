@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 )
@@ -62,5 +63,10 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		}
 		mu.Unlock()
 	}
+}
 
+func startServer() {
+	http.HandleFunc("/ws", handleConnections)
+	fmt.Println("Starting server... on :8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
