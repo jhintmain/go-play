@@ -14,5 +14,4 @@ func main() {
 	} else if os.Args[1] == "client" {
 		startClient()
 	}
-
 }

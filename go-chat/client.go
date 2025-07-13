@@ -16,8 +16,12 @@ func startClient() {
 	var roomID string
 	fmt.Scanln(&roomID)
 
+	fmt.Print("What is nickname:")
+	var nickname string
+	fmt.Scanln(&nickname)
+
 	// roomID 소켓 연결
-	url := fmt.Sprintf("ws://localhost:8080/ws?roomID=%s", roomID)
+	url := fmt.Sprintf("ws://localhost:8080/ws?roomID=%s&nickname=%s", roomID, nickname)
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		log.Fatal("dial:", err)
@@ -32,7 +36,7 @@ func startClient() {
 				log.Println("read:", err)
 				return
 			}
-			fmt.Printf("Message Received: %s\n", message)
+			fmt.Printf("%s\n", message)
 		}
 	}()
 
@@ -42,7 +46,8 @@ func startClient() {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		// 입력받은 text ws에 써주기
-		text := scanner.Text()
+		msg := scanner.Text()
+		text := fmt.Sprintf("%s : %s", nickname, msg)
 		err := conn.WriteMessage(websocket.TextMessage, []byte(text))
 		if err != nil {
 			log.Println("write:", err)
