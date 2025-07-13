@@ -37,14 +37,9 @@ func handleUserList(w http.ResponseWriter, r *http.Request) {
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	// 방 id
 	roomID := r.URL.Query().Get("roomID")
-	if roomID == "" {
-		http.Error(w, "roomId is required", http.StatusBadRequest)
-		return
-	}
-
 	nickname := r.URL.Query().Get("nickname")
-	if nickname == "" {
-		http.Error(w, "nickname is required", http.StatusBadRequest)
+	if roomID == "" || nickname == "" {
+		http.Error(w, "roomID or nicnake is required", http.StatusBadRequest)
 		return
 	}
 
@@ -64,48 +59,62 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("Client joined room [%s]\n", roomID)
 
+	// 같은방 ws들에게 메세지 전파
+	joinMessage := fmt.Sprintf("[%s] 님이 입장", nickname)
+	broadcast(roomID, ws, []byte(joinMessage))
+
 	// ws 읽기 ( 무한 )
 	for {
 		_, message, err := ws.ReadMessage()
-		// 연결 끊기면 해당방에서 ws제거
+		// 연결 끊기면 해당방에서 ws제거 & userlist 에서 제거
 		if err != nil {
-			mu.Lock()
-			conns := roomClients[roomID]
-			for i, conn := range conns {
-				if conn == ws {
-					roomClients[roomID] = append(conns[:i], conns[i+1:]...)
-					removeNickname(roomID, nickname)
-					break
-				}
-			}
-			mu.Unlock()
+			removeConnection(roomID, nickname, ws)
 		}
-
 		// 같은방 ws들에게 메세지 전파
-		mu.Lock()
-		for _, conn := range roomClients[roomID] {
-			// 나는 제외
-			if conn != ws {
-				conn.WriteMessage(websocket.TextMessage, message)
-			}
-		}
-		mu.Unlock()
+		broadcast(roomID, ws, message)
 	}
 }
 
 func startServer() {
 	http.HandleFunc("/ws", handleConnections)
 	http.HandleFunc("/users", handleUserList)
+
 	fmt.Println("Starting server... on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func removeNickname(roomID, nickname string) {
+func removeConnection(roomID, nickname string, conn *websocket.Conn) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	// 소켓 연결 종료
+	conns := roomClients[roomID]
+	for i, con := range conns {
+		if con == conn {
+			roomClients[roomID] = append(conns[:i], conns[i+1:]...)
+			break
+		}
+	}
+
+	// userlist에서 삭제
 	nicknames := roomClientsNickname[roomID]
 	for i, nick := range nicknames {
-		if nickname == nick {
+		if nick == nickname {
 			roomClientsNickname[roomID] = append(nicknames[:i], nicknames[i+1:]...)
 			break
+		}
+	}
+}
+
+// broadcast
+func broadcast(roomID string, sender *websocket.Conn, message []byte) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	conns := roomClients[roomID]
+	for _, conn := range conns {
+		if conn != sender {
+			conn.WriteMessage(websocket.TextMessage, message)
 		}
 	}
 }
