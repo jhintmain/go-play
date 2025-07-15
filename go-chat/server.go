@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,10 +12,16 @@ import (
 )
 import "github.com/gorilla/websocket"
 
+type ClientInfo struct {
+	Conn      *websocket.Conn
+	Nickname  string
+	PublicKey *ecdsa.PublicKey
+}
+
 var (
 	upgrader            = websocket.Upgrader{}
 	mu                  sync.Mutex
-	roomClients         = make(map[string][]*websocket.Conn)
+	roomClients         = make(map[string][]*ClientInfo)
 	roomClientsNickname = make(map[string][]string)
 )
 
@@ -24,10 +33,15 @@ func handleUserList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nicknames, exist := roomClientsNickname[roomID]
+	nicknames := []string{}
+	clients, exist := roomClients[roomID]
 	if !exist {
 		http.Error(w, fmt.Sprintf("room %s not exist", roomID), http.StatusBadRequest)
 		return
+	}
+
+	for _, client := range clients {
+		nicknames = append(nicknames, client.Nickname)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -38,11 +52,23 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	// 방 id
 	roomID := r.URL.Query().Get("roomID")
 	nickname := r.URL.Query().Get("nickname")
-	if roomID == "" || nickname == "" {
-		http.Error(w, "roomID or nicnake is required", http.StatusBadRequest)
+	pubKeyBase64 := r.URL.Query().Get("pubKey")
+	if roomID == "" || nickname == "" || pubKeyBase64 == "" {
+		http.Error(w, "roomID , nickname , publicKey is required", http.StatusBadRequest)
 		return
 	}
 
+	pubKeyBytes, err := base64.StdEncoding.DecodeString(pubKeyBase64)
+	if err != nil {
+		http.Error(w, "publicKey is invalid", http.StatusBadRequest)
+		return
+	}
+
+	publicKey, err := decodePublicKey(pubKeyBytes)
+	if err != nil {
+		http.Error(w, "publicKey is invalid", http.StatusBadRequest)
+		return
+	}
 	// 소켓 conn
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -53,8 +79,13 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 	// 접속방에 client ws 정보 추가
 	mu.Lock()
-	roomClients[roomID] = append(roomClients[roomID], ws)
-	roomClientsNickname[roomID] = append(roomClientsNickname[roomID], nickname)
+	client := &ClientInfo{
+		Conn:      ws,
+		Nickname:  nickname,
+		PublicKey: publicKey,
+	}
+	log.Printf("new client: %v", client)
+	roomClients[roomID] = append(roomClients[roomID], client)
 	mu.Unlock()
 
 	fmt.Printf("Client joined room [%s]\n", roomID)
@@ -88,19 +119,10 @@ func removeConnection(roomID, nickname string, conn *websocket.Conn) {
 	defer mu.Unlock()
 
 	// 소켓 연결 종료
-	conns := roomClients[roomID]
-	for i, con := range conns {
-		if con == conn {
-			roomClients[roomID] = append(conns[:i], conns[i+1:]...)
-			break
-		}
-	}
-
-	// userlist에서 삭제
-	nicknames := roomClientsNickname[roomID]
-	for i, nick := range nicknames {
-		if nick == nickname {
-			roomClientsNickname[roomID] = append(nicknames[:i], nicknames[i+1:]...)
+	clients := roomClients[roomID]
+	for i, client := range clients {
+		if client.Conn == conn {
+			roomClients[roomID] = append(clients[:i], clients[i+1:]...)
 			break
 		}
 	}
@@ -111,10 +133,19 @@ func broadcast(roomID string, sender *websocket.Conn, message []byte) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	conns := roomClients[roomID]
-	for _, conn := range conns {
-		if conn != sender {
-			conn.WriteMessage(websocket.TextMessage, message)
+	clients := roomClients[roomID]
+	for _, client := range clients {
+		if client.Conn != sender {
+			client.Conn.WriteMessage(websocket.TextMessage, message)
 		}
 	}
+}
+
+func decodePublicKey(pubKeyBytes []byte) (*ecdsa.PublicKey, error) {
+	x, y := elliptic.Unmarshal(elliptic.P256(), pubKeyBytes)
+	if x == nil || y == nil {
+		return nil, fmt.Errorf("invalid public key")
+	}
+
+	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
 }

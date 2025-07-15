@@ -2,6 +2,10 @@ package main
 
 import (
 	"bufio"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"github.com/gorilla/websocket"
 	"log"
@@ -20,8 +24,19 @@ func startClient() {
 	var nickname string
 	fmt.Scanln(&nickname)
 
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		log.Fatal("GenerateKey key fail", err)
+	}
+	pubKey := &priv.PublicKey
+
+	pubKeyBytes := elliptic.Marshal(pubKey.Curve, pubKey.X, pubKey.Y)
+
+	pubKeyBase64 := base64.StdEncoding.EncodeToString(pubKeyBytes)
+
+	log.Printf("pubKeyBase64: %s", pubKeyBase64)
 	// roomID 소켓 연결
-	url := fmt.Sprintf("ws://localhost:8080/ws?roomID=%s&nickname=%s", roomID, nickname)
+	url := fmt.Sprintf("ws://localhost:8080/ws?roomID=%s&nickname=%s&pubKey=%s", roomID, nickname, pubKeyBase64)
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		log.Fatal("dial:", err)
