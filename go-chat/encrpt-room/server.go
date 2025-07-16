@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -22,6 +23,7 @@ var (
 	upgrader    = websocket.Upgrader{}
 	mu          sync.Mutex
 	roomClients = make(map[string][]*ClientInfo)
+	roomAESKey  = make(map[string][]byte)
 )
 
 func handleUserList(w http.ResponseWriter, r *http.Request) {
@@ -76,16 +78,27 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ws.Close()
 
-	// 접속방에 client ws 정보 추가
-	mu.Lock()
 	client := &ClientInfo{
 		Conn:      ws,
 		Nickname:  nickname,
 		PublicKey: publicKey,
 	}
 	log.Printf("new client: %v", client)
+
+	// 접속방에 client ws 정보 추가
+	mu.Lock()
+	if _, exist := roomAESKey[roomID]; !exist {
+		key := make([]byte, 16)
+		rand.Read(key)
+		roomAESKey[roomID] = key
+	}
+
 	roomClients[roomID] = append(roomClients[roomID], client)
+	roomAESKey := roomAESKey[roomID]
 	mu.Unlock()
+
+	// 방 AES 키를 클라이언트의 공개키로 암호화해서 전송
+	go sendEncryptedAESKey(client, roomAESKey)
 
 	defer func() {
 		leaveMsg := fmt.Sprintf("[%s]님이 퇴장하였습니다", nickname)
@@ -112,6 +125,10 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		broadcast(roomID, ws, message)
 	}
 
+}
+
+func sendEncryptedAESKey(client *ClientInfo, roomAESKey []byte) {
+	// todo : 공개키 만들고 client들에게 보내기
 }
 
 func startServer() {
