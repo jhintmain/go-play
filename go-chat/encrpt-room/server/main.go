@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"crypto/ecdsa"
@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"go-chat/encrpt-room/crypto"
 	"log"
 	"net/http"
 	"sync"
@@ -19,35 +20,17 @@ type ClientInfo struct {
 	PublicKey *ecdsa.PublicKey
 }
 
-var (
-	upgrader    = websocket.Upgrader{}
-	mu          sync.Mutex
-	roomClients = make(map[string][]*ClientInfo)
-	roomAESKey  = make(map[string][]byte)
-)
-
-func handleUserList(w http.ResponseWriter, r *http.Request) {
-	// 방 id
-	roomID := r.URL.Query().Get("roomID")
-	if roomID == "" {
-		http.Error(w, "roomID is required", http.StatusBadRequest)
-		return
-	}
-
-	nicknames := []string{}
-	clients, exist := roomClients[roomID]
-	if !exist {
-		http.Error(w, fmt.Sprintf("room %s not exist", roomID), http.StatusBadRequest)
-		return
-	}
-
-	for _, client := range clients {
-		nicknames = append(nicknames, client.Nickname)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(nicknames)
+type Room struct {
+	Id      string
+	AesKey  []byte
+	Clients []*ClientInfo
 }
+
+var (
+	upgrader = websocket.Upgrader{}
+	mu       sync.Mutex
+	rooms    map[string]*Room
+)
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	// 방 id
@@ -87,18 +70,22 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 	// 접속방에 client ws 정보 추가
 	mu.Lock()
-	if _, exist := roomAESKey[roomID]; !exist {
+	room, exist := rooms[roomID]
+	if !exist {
 		key := make([]byte, 16)
 		rand.Read(key)
-		roomAESKey[roomID] = key
+		room = &Room{
+			Id:      roomID,
+			AesKey:  key,
+			Clients: []*ClientInfo{},
+		}
 	}
 
-	roomClients[roomID] = append(roomClients[roomID], client)
-	roomAESKey := roomAESKey[roomID]
+	room.Clients = append(room.Clients, client)
 	mu.Unlock()
 
 	// 방 AES 키를 클라이언트의 공개키로 암호화해서 전송
-	go sendEncryptedAESKey(client, roomAESKey)
+	go sendEncryptedAESKey(client, room.AesKey)
 
 	defer func() {
 		leaveMsg := fmt.Sprintf("[%s]님이 퇴장하였습니다", nickname)
@@ -127,11 +114,42 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func sendEncryptedAESKey(client *ClientInfo, roomAESKey []byte) {
-	// todo : 공개키 만들고 client들에게 보내기
+func handleUserList(w http.ResponseWriter, r *http.Request) {
+	// 방 id
+	roomID := r.URL.Query().Get("roomID")
+	if roomID == "" {
+		http.Error(w, "roomID is required", http.StatusBadRequest)
+		return
+	}
+
+	nicknames := []string{}
+	room, exist := rooms[roomID]
+	if !exist {
+		http.Error(w, fmt.Sprintf("room %s not exist", roomID), http.StatusBadRequest)
+		return
+	}
+
+	for _, client := range room.Clients {
+		nicknames = append(nicknames, client.Nickname)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(nicknames)
 }
 
-func startServer() {
+// todo : 공개키 만들고 client들에게 보내기
+func sendEncryptedAESKey(client *ClientInfo, roomAESKey []byte) {
+	sharedKey := crypto.GenerateSharedKey(client.PublicKey, roomAESKey)
+
+	encryptedKey, _ := crypto.EncryptAES(sharedKey, roomAESKey)
+	msg := map[string]interface{}{
+		"type":      "key",
+		"crypt_key": base64.StdEncoding.EncodeToString(encryptedKey),
+	}
+	client.Conn.WriteJSON(msg)
+}
+
+func StartServer() {
 	http.HandleFunc("/ws", handleConnections)
 	http.HandleFunc("/users", handleUserList)
 
@@ -144,16 +162,16 @@ func removeConnection(roomID string, conn *websocket.Conn) {
 	defer mu.Unlock()
 
 	// 소켓 연결 종료
-	clients := roomClients[roomID]
-	for i, client := range clients {
+	room := rooms[roomID]
+	for i, client := range room.Clients {
 		if client.Conn == conn {
-			roomClients[roomID] = append(clients[:i], clients[i+1:]...)
+			room.Clients = append(room.Clients[:i], room.Clients[i+1:]...)
 			break
 		}
 	}
 
-	if len(clients) == 0 {
-		delete(roomClients, roomID)
+	if len(room.Clients) == 0 {
+		delete(rooms, roomID)
 	}
 }
 
@@ -162,8 +180,8 @@ func broadcast(roomID string, sender *websocket.Conn, message []byte) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	clients := roomClients[roomID]
-	for _, client := range clients {
+	room := rooms[roomID]
+	for _, client := range room.Clients {
 		if client.Conn != sender {
 			if err := client.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				log.Printf("write error to client [%s]: %v", client.Nickname, err)

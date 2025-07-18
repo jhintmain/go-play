@@ -1,4 +1,4 @@
-package main
+package client
 
 import (
 	"bufio"
@@ -16,7 +16,7 @@ import (
 
 var aesKey []byte
 
-func startClient() {
+func StartClient() {
 	fmt.Println("Starting client... on :8080")
 
 	// 접속할 roomID 입력받기
