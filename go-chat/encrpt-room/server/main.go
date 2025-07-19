@@ -10,6 +10,7 @@ import (
 	"go-chat/encrpt-room/crypto"
 	"log"
 	"net/http"
+	"net/url"
 	"sync"
 )
 import "github.com/gorilla/websocket"
@@ -27,9 +28,13 @@ type Room struct {
 }
 
 var (
-	upgrader = websocket.Upgrader{}
-	mu       sync.Mutex
-	rooms    map[string]*Room
+	upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return true // 모든 origin 허용
+		},
+	}
+	mu    sync.Mutex
+	rooms = make(map[string]*Room)
 )
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
@@ -44,13 +49,13 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 	pubKeyBytes, err := base64.StdEncoding.DecodeString(pubKeyBase64)
 	if err != nil {
-		http.Error(w, "publicKey is invalid", http.StatusBadRequest)
+		http.Error(w, "publicKey is invalid 1", http.StatusBadRequest)
 		return
 	}
 
 	publicKey, err := decodePublicKey(pubKeyBytes)
 	if err != nil {
-		http.Error(w, "publicKey is invalid", http.StatusBadRequest)
+		http.Error(w, "publicKey is invalid 2", http.StatusBadRequest)
 		return
 	}
 	// 소켓 conn
@@ -66,19 +71,12 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		Nickname:  nickname,
 		PublicKey: publicKey,
 	}
-	log.Printf("new client: %v", client)
-
 	// 접속방에 client ws 정보 추가
 	mu.Lock()
 	room, exist := rooms[roomID]
 	if !exist {
-		key := make([]byte, 16)
-		rand.Read(key)
-		room = &Room{
-			Id:      roomID,
-			AesKey:  key,
-			Clients: []*ClientInfo{},
-		}
+		room = createRoom(roomID)
+		rooms[roomID] = room
 	}
 
 	room.Clients = append(room.Clients, client)
@@ -95,8 +93,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("Client joined room [%s]\n", roomID)
 
 	// 같은방 ws들에게 메세지 전파
-	joinMessage := fmt.Sprintf("[%s] 님이 입장", nickname)
-	broadcast(roomID, ws, []byte(joinMessage))
+	//joinMessage := fmt.Sprintf("[%s] 님이 입장", nickname)
+	//broadcast(roomID, ws, []byte(joinMessage))
 
 	// ws 읽기 ( 무한 )
 	for {
@@ -137,15 +135,28 @@ func handleUserList(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(nicknames)
 }
 
-// todo : 공개키 만들고 client들에게 보내기
+func createRoom(roomID string) *Room {
+	key := make([]byte, 16)
+	rand.Read(key)
+	room := &Room{
+		Id:      roomID,
+		AesKey:  key,
+		Clients: []*ClientInfo{},
+	}
+	fmt.Printf("new room [%s] %s\n", roomID, room.AesKey)
+	return room
+}
+
+// 공개키 만들고 client들에게 보내기
 func sendEncryptedAESKey(client *ClientInfo, roomAESKey []byte) {
 	sharedKey := crypto.GenerateSharedKey(client.PublicKey, roomAESKey)
 
 	encryptedKey, _ := crypto.EncryptAES(sharedKey, roomAESKey)
 	msg := map[string]interface{}{
 		"type":      "key",
-		"crypt_key": base64.StdEncoding.EncodeToString(encryptedKey),
+		"crypt_key": url.QueryEscape(base64.StdEncoding.EncodeToString(encryptedKey)),
 	}
+
 	client.Conn.WriteJSON(msg)
 }
 
@@ -180,7 +191,12 @@ func broadcast(roomID string, sender *websocket.Conn, message []byte) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	room := rooms[roomID]
+	room, exist := rooms[roomID]
+	if !exist {
+		fmt.Printf("Room [%s] is not exist", roomID)
+		return
+	}
+
 	for _, client := range room.Clients {
 		if client.Conn != sender {
 			if err := client.Conn.WriteMessage(websocket.TextMessage, message); err != nil {

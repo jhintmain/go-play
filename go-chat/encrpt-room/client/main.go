@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"github.com/gorilla/websocket"
 	"go-chat/encrpt-room/crypto"
+	"io"
 	"log"
+	"net/url"
 	"os"
 )
 
@@ -33,17 +35,22 @@ func StartClient() {
 		log.Fatal("GenerateKey key fail", err)
 	}
 	pubKey := &priv.PublicKey
-
 	pubKeyBytes := elliptic.Marshal(pubKey.Curve, pubKey.X, pubKey.Y)
-
 	pubKeyBase64 := base64.StdEncoding.EncodeToString(pubKeyBytes)
+	pubKeyBase64Escaped := url.QueryEscape(pubKeyBase64)
 
 	log.Printf("pubKeyBase64: %s", pubKeyBase64)
 	// roomID 소켓 연결
-	url := fmt.Sprintf("ws://localhost:8080/ws?roomID=%s&nickname=%s&pubKey=%s", roomID, nickname, pubKeyBase64)
-	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	url := fmt.Sprintf("ws://localhost:8080/ws?roomID=%s&nickname=%s&pubKey=%s", roomID, nickname, pubKeyBase64Escaped)
+	conn, resp, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
-		log.Fatal("dial:", err)
+		if resp != nil {
+			body, _ := io.ReadAll(resp.Body)
+			log.Fatalf("dial error: %v\nstatus: %s\nbody: %s", err, resp.Status, string(body))
+		} else {
+			log.Fatal("dial error:", err)
+		}
+
 	}
 	defer conn.Close()
 
@@ -58,13 +65,15 @@ func StartClient() {
 
 			var data map[string]string
 
-			if json.Unmarshal(message, &data) != nil && data["type"] == "key" {
+			if err := json.Unmarshal(message, &data); err == nil && data["type"] == "key" {
 				// 서버로 부터 받은 공유키 decode
 				encryptedSharedKey, _ := base64.StdEncoding.DecodeString(data["crypt_key"])
 
+				fmt.Println("encryptedSharedKey:", string(encryptedSharedKey))
 				// decode 된 공유키 내 공유/비밀키로 대칭키 생성 > 내 key가지고 암호화되서 내껄로 하면됨
 				sharedKey := crypto.GenerateSharedKey(pubKey, priv.D.Bytes())
 
+				fmt.Println("sharedKey:", sharedKey)
 				// 대칭키로 암호화된 key 최종 복호화
 				aesKey, _ = crypto.DecryptAES(sharedKey, encryptedSharedKey)
 				fmt.Println("received AES key:", aesKey)
