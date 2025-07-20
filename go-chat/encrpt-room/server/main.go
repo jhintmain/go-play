@@ -3,7 +3,6 @@ package server
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,14 +15,15 @@ import (
 import "github.com/gorilla/websocket"
 
 type ClientInfo struct {
-	Conn      *websocket.Conn
-	Nickname  string
-	PublicKey *ecdsa.PublicKey
+	Conn     *websocket.Conn
+	Nickname string
+	PubKey   *ecdsa.PublicKey
 }
 
 type Room struct {
 	Id      string
-	AesKey  []byte
+	PubKey  *ecdsa.PublicKey
+	PriKey  *ecdsa.PrivateKey
 	Clients []*ClientInfo
 }
 
@@ -53,11 +53,12 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	publicKey, err := decodePublicKey(pubKeyBytes)
+	pubKey, err := crypto.DecodePublicKey(pubKeyBytes)
 	if err != nil {
-		http.Error(w, "publicKey is invalid 2", http.StatusBadRequest)
+		http.Error(w, "publicKey decode fail", http.StatusBadRequest)
 		return
 	}
+
 	// 소켓 conn
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -67,9 +68,9 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	defer ws.Close()
 
 	client := &ClientInfo{
-		Conn:      ws,
-		Nickname:  nickname,
-		PublicKey: publicKey,
+		Conn:     ws,
+		Nickname: nickname,
+		PubKey:   pubKey,
 	}
 	// 접속방에 client ws 정보 추가
 	mu.Lock()
@@ -82,8 +83,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	room.Clients = append(room.Clients, client)
 	mu.Unlock()
 
-	// 방 AES 키를 클라이언트의 공개키로 암호화해서 전송
-	go sendEncryptedAESKey(client, room.AesKey)
+	// 방 공유키 전달
+	go sendEncryptedAESKey(client, room.PubKey)
 
 	defer func() {
 		leaveMsg := fmt.Sprintf("[%s]님이 퇴장하였습니다", nickname)
@@ -93,8 +94,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("Client joined room [%s]\n", roomID)
 
 	// 같은방 ws들에게 메세지 전파
-	//joinMessage := fmt.Sprintf("[%s] 님이 입장", nickname)
-	//broadcast(roomID, ws, []byte(joinMessage))
+	joinMessage := fmt.Sprintf("[%s] 님이 입장", nickname)
+	broadcast(roomID, ws, []byte(joinMessage))
 
 	// ws 읽기 ( 무한 )
 	for {
@@ -106,10 +107,14 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		sharedKey := crypto.GenerateSharedKey(pubKey, room.PriKey)
+		decryptMessage, err := crypto.DecryptAES(sharedKey, message)
+		if err != nil {
+			log.Printf("decrypt message error: %v", err)
+		}
 		// 같은방 ws들에게 메세지 전파
-		broadcast(roomID, ws, message)
+		broadcast(roomID, ws, decryptMessage)
 	}
-
 }
 
 func handleUserList(w http.ResponseWriter, r *http.Request) {
@@ -136,26 +141,26 @@ func handleUserList(w http.ResponseWriter, r *http.Request) {
 }
 
 func createRoom(roomID string) *Room {
-	key := make([]byte, 16)
-	rand.Read(key)
+	keyPair := crypto.GenerateKey()
 	room := &Room{
 		Id:      roomID,
-		AesKey:  key,
+		PubKey:  keyPair.PubKey,
+		PriKey:  keyPair.PriKey,
 		Clients: []*ClientInfo{},
 	}
-	fmt.Printf("new room [%s] %s\n", roomID, room.AesKey)
+	fmt.Printf("new room [%s]\n", roomID)
 	return room
 }
 
 // 공개키 만들고 client들에게 보내기
-func sendEncryptedAESKey(client *ClientInfo, roomAESKey []byte) {
-	sharedKey := crypto.GenerateSharedKey(client.PublicKey, roomAESKey)
-
-	encryptedKey, _ := crypto.EncryptAES(sharedKey, roomAESKey)
+func sendEncryptedAESKey(client *ClientInfo, pubKey *ecdsa.PublicKey) {
+	pubKeyByte := elliptic.Marshal(pubKey.Curve, pubKey.X, pubKey.Y)
 	msg := map[string]interface{}{
-		"type":      "key",
-		"crypt_key": url.QueryEscape(base64.StdEncoding.EncodeToString(encryptedKey)),
+		"type":   "key",
+		"pubKey": url.QueryEscape(base64.StdEncoding.EncodeToString(pubKeyByte)),
 	}
+
+	fmt.Println(msg)
 
 	client.Conn.WriteJSON(msg)
 }
@@ -199,19 +204,17 @@ func broadcast(roomID string, sender *websocket.Conn, message []byte) {
 
 	for _, client := range room.Clients {
 		if client.Conn != sender {
-			if err := client.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
+			sharedKey := crypto.GenerateSharedKey(client.PubKey, room.PriKey)
+			fmt.Printf("Shared key [%s] [%s]\n", client.Nickname, sharedKey)
+			encryptMessage, err := crypto.EncryptAES(sharedKey, message)
+			if err != nil {
+				log.Printf("encrypt message error: %v", err)
+			}
+			fmt.Printf("Encrypted message [%s]\n", string(encryptMessage))
+			if err := client.Conn.WriteMessage(websocket.TextMessage, encryptMessage); err != nil {
 				log.Printf("write error to client [%s]: %v", client.Nickname, err)
 				removeConnection(roomID, client.Conn)
 			}
 		}
 	}
-}
-
-func decodePublicKey(pubKeyBytes []byte) (*ecdsa.PublicKey, error) {
-	x, y := elliptic.Unmarshal(elliptic.P256(), pubKeyBytes)
-	if x == nil || y == nil {
-		return nil, fmt.Errorf("invalid public key")
-	}
-
-	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
 }

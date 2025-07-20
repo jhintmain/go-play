@@ -2,9 +2,6 @@ package client
 
 import (
 	"bufio"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -30,19 +27,13 @@ func StartClient() {
 	var nickname string
 	fmt.Scanln(&nickname)
 
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		log.Fatal("GenerateKey key fail", err)
-	}
-	pubKey := &priv.PublicKey
-	pubKeyBytes := elliptic.Marshal(pubKey.Curve, pubKey.X, pubKey.Y)
-	pubKeyBase64 := base64.StdEncoding.EncodeToString(pubKeyBytes)
-	pubKeyBase64Escaped := url.QueryEscape(pubKeyBase64)
+	keyPair := crypto.GenerateKey()
+	pubKey := keyPair.GetPubKeyToString()
 
-	log.Printf("pubKeyBase64: %s", pubKeyBase64)
+	log.Printf("generated pubKey: %s", pubKey)
 	// roomID 소켓 연결
-	url := fmt.Sprintf("ws://localhost:8080/ws?roomID=%s&nickname=%s&pubKey=%s", roomID, nickname, pubKeyBase64Escaped)
-	conn, resp, err := websocket.DefaultDialer.Dial(url, nil)
+	serverUrl := fmt.Sprintf("ws://localhost:8080/ws?roomID=%s&nickname=%s&pubKey=%s", roomID, nickname, pubKey)
+	conn, resp, err := websocket.DefaultDialer.Dial(serverUrl, nil)
 	if err != nil {
 		if resp != nil {
 			body, _ := io.ReadAll(resp.Body)
@@ -66,17 +57,30 @@ func StartClient() {
 			var data map[string]string
 
 			if err := json.Unmarshal(message, &data); err == nil && data["type"] == "key" {
-				// 서버로 부터 받은 공유키 decode
-				encryptedSharedKey, _ := base64.StdEncoding.DecodeString(data["crypt_key"])
+				// 서버로 부터 받은 방 공개키
+				fmt.Printf("pubKey: %s\n", data["pubKey"])
+				decodedStr, err := url.QueryUnescape(data["pubKey"])
+				if err != nil {
+					log.Fatalf("url decode error: %v", err)
+				}
+				roomPubKeyByte, err := base64.StdEncoding.DecodeString(decodedStr)
+				if err != nil {
+					log.Fatalf("base64 decode error: %v", err)
+				}
+				roomPubKey, err := crypto.DecodePublicKey(roomPubKeyByte)
+				if err != nil {
+					log.Fatalf("decode public key error: %v", err)
+				}
 
-				fmt.Println("encryptedSharedKey:", string(encryptedSharedKey))
-				// decode 된 공유키 내 공유/비밀키로 대칭키 생성 > 내 key가지고 암호화되서 내껄로 하면됨
-				sharedKey := crypto.GenerateSharedKey(pubKey, priv.D.Bytes())
+				//fmt.Printf("roomPubKey: %s", roomPubKey)
 
-				fmt.Println("sharedKey:", sharedKey)
-				// 대칭키로 암호화된 key 최종 복호화
-				aesKey, _ = crypto.DecryptAES(sharedKey, encryptedSharedKey)
-				fmt.Println("received AES key:", aesKey)
+				// 공유키 생성
+				sharedKey := crypto.GenerateSharedKey(roomPubKey, keyPair.PriKey)
+				//fmt.Printf("sharedKey: %s", sharedKey)
+
+				// 대칭키 생성( 공유키가 곧 대칭키)
+				aesKey = sharedKey
+
 				continue
 			}
 
@@ -85,6 +89,7 @@ func StartClient() {
 				if err != nil {
 					fmt.Sprintf("decrypt error:%v", err)
 				} else {
+					fmt.Printf("message: %s\n", message)
 					fmt.Printf("%s\n", string(decryptedMessage))
 				}
 			} else {

@@ -5,13 +5,42 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/base64"
 	"fmt"
+	"log"
+	"net/url"
 )
 
+type KeyPair struct {
+	PubKey *ecdsa.PublicKey
+	PriKey *ecdsa.PrivateKey
+}
+
+func (k *KeyPair) GetPubKeyToString() string {
+	pubKeyBytes := elliptic.Marshal(k.PubKey.Curve, k.PubKey.X, k.PubKey.Y)
+	pubKeyBase64 := base64.StdEncoding.EncodeToString(pubKeyBytes)
+	pubKeyBase64Escaped := url.QueryEscape(pubKeyBase64)
+	return pubKeyBase64Escaped
+}
+
+func GenerateKey() *KeyPair {
+	priKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		log.Fatal("GenerateKey key fail", err)
+	}
+	pubKey := &priKey.PublicKey
+	keypair := &KeyPair{
+		PubKey: pubKey,
+		PriKey: priKey,
+	}
+	return keypair
+}
+
 // 공유키 & 비밀키로 복호화 할수있는 대칭키 생성
-func GenerateSharedKey(pubKey *ecdsa.PublicKey, k []byte) []byte {
-	sharedX, _ := pubKey.Curve.ScalarMult(pubKey.X, pubKey.Y, k)
+func GenerateSharedKey(pubKey *ecdsa.PublicKey, priKey *ecdsa.PrivateKey) []byte {
+	sharedX, _ := pubKey.Curve.ScalarMult(pubKey.X, pubKey.Y, priKey.D.Bytes())
 	sharedKey := sharedX.Bytes()
 	if len(sharedKey) > 16 {
 		sharedKey = sharedKey[0:16]
@@ -75,4 +104,12 @@ func unpad(src []byte) ([]byte, error) {
 		return nil, fmt.Errorf("invalid padding")
 	}
 	return src[:len(src)-padLen], nil
+}
+
+func DecodePublicKey(pubKeyBytes []byte) (*ecdsa.PublicKey, error) {
+	x, y := elliptic.Unmarshal(elliptic.P256(), pubKeyBytes)
+	if x == nil || y == nil {
+		return nil, fmt.Errorf("invalid public key")
+	}
+	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
 }
