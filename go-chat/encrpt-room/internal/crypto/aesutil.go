@@ -88,6 +88,14 @@ func EncryptAES(key, plaintext []byte) ([]byte, error) {
 	return append(iv, ciphertext...), nil
 }
 
+func DecodePublicKey(pubKeyBytes []byte) (*ecdsa.PublicKey, error) {
+	x, y := elliptic.Unmarshal(elliptic.P256(), pubKeyBytes)
+	if x == nil || y == nil {
+		return nil, fmt.Errorf("invalid public key")
+	}
+	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
+}
+
 // PKCS7 padding
 func pad(src []byte) []byte {
 	padLen := aes.BlockSize - len(src)%aes.BlockSize
@@ -104,12 +112,4 @@ func unpad(src []byte) ([]byte, error) {
 		return nil, fmt.Errorf("invalid padding")
 	}
 	return src[:len(src)-padLen], nil
-}
-
-func DecodePublicKey(pubKeyBytes []byte) (*ecdsa.PublicKey, error) {
-	x, y := elliptic.Unmarshal(elliptic.P256(), pubKeyBytes)
-	if x == nil || y == nil {
-		return nil, fmt.Errorf("invalid public key")
-	}
-	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
 }

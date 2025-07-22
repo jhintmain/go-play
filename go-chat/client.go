@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/gorilla/websocket"
-	"go-chat/encrpt-room/crypto"
+	"go-chat/encrpt-room/internal/crypto"
 	"log"
 	"os"
 )
